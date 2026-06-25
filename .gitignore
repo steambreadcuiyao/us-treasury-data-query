@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+output/
+*.csv
+*.txt
+*.pdf
+.venv/
+venv/
+.DS_Store
