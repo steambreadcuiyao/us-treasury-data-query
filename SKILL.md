@@ -1341,6 +1341,12 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 - **DTS数据集主页**: https://fiscaldata.treasury.gov/datasets/daily-treasury-statement/
 - **API基础路径**: https://api.fiscaldata.treasury.gov/services/api/fiscal_service
 
+### FIMA 数据（美联储 H.4.1 报表）
+- **FIMA 数据（外国央行及国际机构持有美债）目前只能通过美联储官网每周四发布的 H.4.1 报表获取**：https://www.federalreserve.gov/releases/h41/current/h41.htm
+- 报表标题含发布日（如 "July 30, 2026"），数据反映前一周三（如 Jul 29, 2026）
+- 表格无 id 属性，需按 `<td id="t?r?c?">` 结构解析；FIMA 相关行：Table 1 `Repurchase agreements` → `Foreign official`（FIMA Repo Facility）、Table 2 `Reverse repurchase agreements` → `Foreign official and international accounts`、Table 3 `Securities held in custody for foreign official and international accounts`（含 `Marketable U.S. Treasury securities` 可流通美债托管额）
+- 金额单位：百万美元（$2,638,757 = $2.64T）
+
 ### TreasuryDirect 拍卖数据
 - **Tentative Auction Schedule (PDF)**: https://home.treasury.gov/system/files/221/Tentative-Auction-Schedule.pdf
 - **拍卖结果 XML 模板**: `https://treasurydirect.gov/xml/R_YYYYMMDD_N.xml`
@@ -1367,4 +1373,6 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 - **Previous Announcements 页面** / JS 多标签限制：`previous-announcements-and-results/` 页面用 JavaScript 分标签（Bills / Notes / Bonds / TIPS / FRNs），WebFetch 只抓取初始 HTML 的 Bills 标签。要获取所有证券类型的结果 → 需用 Agent Browser 打开页面并切标签。
 - **Upcoming Auctions XML** / 限制：`PendingAuctions.xml` 每周五更新，仅含已公告拍卖的基本字段（SecurityType、CUSIP、日期、规模），**不含 bid-to-cover 等结果数据**（还没拍）。
 - **网络连接** / TreasuryDirect 偶发 Reset：批量抓取时偶发 `WinError 10054`（远程主机关闭连接），需加重试机制。请求间隔建议 0.15~0.3 秒。
+- **FIMA 数据** / 数据源：FIMA（Foreign & International Monetary Authorities，外国央行及国际货币当局持有美债）数据**不在** TIC 或 FiscalData API 中，目前只能通过美联储官网每周四发布的 **H.4.1 报表**（Factors Affecting Reserve Balances）获取，URL: `https://www.federalreserve.gov/releases/h41/current/h41.htm`。该 HTML 约 700KB，表格无 id 属性，解析需按 `<td id="tNrMcN">` 定位行。curl 在沙箱内可能静默失败（exit 0 但无文件），需用 Python urllib + SSL 关闭校验下载。
+- **H.4.1 报表** / FIMA 相关行定位：Table 1 的 `Repurchase agreements` → `Foreign official` 行 = **FIMA Repo Facility 余额**；Table 2 的 `Reverse repurchase agreements` → `Foreign official and international accounts` = 外国官方 ON RRP；Table 3 `Securities held in custody for foreign official and international accounts` → `Marketable U.S. Treasury securities` = **外国官方托管的可流通美债额**（FIMA 持债核心指标）。金额单位为百万美元。
 - **Tentative Schedule 发布节奏** / 规律：Q1(2月初)/Q2(5月初)/Q3(8月初)/Q4(11月初)，覆盖未来约6个月。PDF 文件名 `TentativeAuctionScheduleQ<X><Year>.pdf`，但主页 URL 总是 `Tentative-Auction-Schedule.pdf` 指向最新版。
