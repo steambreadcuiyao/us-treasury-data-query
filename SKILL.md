@@ -98,10 +98,11 @@ agent_created: true
 - 查**收入**：筛选 `transaction_type:eq:Deposits`，再按 `transaction_catg` 分组汇总
 - 关键字段：
   - `transaction_catg`：交易类别代码（如 `Dept of Defense (DoD)`、`DoD - Military Active Duty Pay`）
-  - `transaction_catg_desc`：交易类别描述（通常为 null）
-  - `transaction_today_amt`：当日金额
+  - `transaction_catg_desc`：交易类别描述（实测返回字符串 `"null"`，无有效内容，忽略即可）
+  - `transaction_today_amt`：当日金额，**直接可用**（2026-08-31 实测非空，详见坑2）
   - `transaction_mtd_amt`：月度累计金额（Month-To-Date，取最新日期的最大值）
   - `transaction_fytd_amt`：财年累计金额（Fiscal Year-To-Date）
+- ⚠️ **必做**：取明细时过滤 `account_type:eq:Treasury General Account (TGA)`，否则混入 Total 汇总行导致结果翻倍（详见坑1）
 - 常见部门/类别代码示例：
   - `Dept of Defense (DoD)` / `DoD - Military Active Duty Pay` / `DoD - Military Retirement` → 国防部
   - `Dept of Agriculture (USDA)` → 农业部
@@ -1162,52 +1163,76 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 
 > 以下经验来自实际调用中的反复踩坑，每次更新技能后务必同步到此节。
 
-### 坑1：`transaction_catg` 为 `null` 是 Total 汇总行，不是独立分类
+### 坑1：Total 汇总行靠 `account_type` 识别，不是靠 `transaction_catg` 为 null
 
-**现象**：`deposits_withdrawals_operating_cash` 表中大量行的 `transaction_catg` 为 `null`，初看以为是"无分类"，实际上是**当日汇总行**（Total）。
+> ⚠️ **2026-08-31 修订**：本节原有结论（"`transaction_catg` 为 null 的是 Total 行，需排除 null 行"）**经实测证伪并已重写**。按旧结论写过滤条件，会漏掉真正的汇总行导致合计翻倍。
 
-**验证方法**：检查这些行的 `account_type` 字段，通常包含 `"Total"` 字样，如 `"Total Treasury General Account (TGA)"`。
+**实测结论（2026-08-31 验证）**：`transaction_catg` 字段**没有 null 值**——2020/2022/2023/2024/2025/2026 年各抽样一个月，`transaction_catg` 空值数均为 0。汇总行不是靠 catg 为 null 标识的。
+
+**汇总行的真实标识方式**：看 `account_type` 字段。单日约 180 行中，`account_type` 有三种取值：
+
+| `account_type` 取值 | 含义 | 单日行数 |
+|---|---|---|
+| `Treasury General Account (TGA)` | 明细行（要的） | 178 |
+| `Treasury General Account Total Deposits` | 收入汇总 Total 行 | 1 |
+| `Treasury General Account Total Withdrawals` | 支出汇总 Total 行 | 1 |
 
 **正确做法**：
-- 计算每日收支明细时，**必须排除 `transaction_catg` 为 `null`（或空字符串）的行**
-- 汇总行已包含在分类明细的 MTD differential 合计中，不排除会导致 **double-counting**
 
 ```python
-# ✅ 正确：只保留有 transaction_catg 的明细行
+# ✅ 正确：按 account_type 精确过滤明细
+detail = [r for r in data if r['account_type'] == 'Treasury General Account (TGA)']
+
+# ✅ 等价写法：排除含 Total 的行
+detail = [r for r in data if 'Total' not in r['account_type']]
+
+# ❌ 错误：按旧结论过滤 null catg —— 一条都过滤不掉，Total 行被混入
 detail = [r for r in data if r.get('transaction_catg') and r.get('transaction_catg') != '']
 
-# ❌ 错误：包含 null 行，导致汇总值翻倍
-detail = [r for r in data if r.get('tran_type_desc') == 'Deposits']
+# ❌ 错误：不过滤任何东西，直接按 transaction_type 取
+detail = [r for r in data if r['transaction_type'] == 'Deposits']
 ```
 
-**适用于**：`Deposits` 和 `Withdrawals` 两个 `tran_type_desc` 均存在此问题。
+**自检方法**：明细行 `transaction_today_amt` 之和应约等于对应 Total 行的值（实测 2026-08-27：收入 288,579 vs Total 288,576；支出 297,206 vs Total 297,207，差额仅四舍五入误差）。差 2 倍就是没过滤掉 Total 行。
+
+**适用于**：`Deposits` 和 `Withdrawals` 两个 `transaction_type` 结构完全对称，同样处理。
 
 ---
 
-### 坑2：`transaction_today_amt` 字段全为 null，必须用 MTD differential 计算每日金额
+### 坑2：`transaction_today_amt` 直接可用，不需要 MTD differential
 
-**现象**：API 返回的 `transaction_today_amt` 字段**全部为 null**（至少2026年至今的数据如此），无法直接使用。
+> ⚠️ **2026-08-31 修订**：本节原有结论（"该字段全为 null，必须用 MTD 差分"）**经实测证伪并已重写**。继续用 MTD 差分不仅绕远路，还会因月末清零规则引入误差。
 
-**根本原因**：财政部 DTS 报告中，`transaction_today_amt` 某些时期不填充，依赖使用者通过 MTD 累计值差分计算。
+**实测结论（2026-08-31 验证）**：抽样 2020-06 / 2022-06 / 2023-06 / 2024-06 / 2025-06 / 2026-03 / 2026-08-27，`transaction_today_amt` **空值率全部为 0%**，可直接读取当日金额。
 
-**正确做法**：用 `transaction_mtd_amt`（Month-To-Date 累计值）做差分：
+**正确做法**：
 
 ```python
-# 对每个 account_type + transaction_catg 组合，按日期排序后差分
-prev_mtd = {}  # key: catg, value: 前一日 MTD 值
+# ✅ 正确：直接用当日金额
+amt_millions = float(r['transaction_today_amt'])   # 单位：百万美元
+amt_billions = amt_millions / 1000                # 转十亿美元
 
-for date in sorted(dates):
-    for mtd_val, catg in daily_data[date][acct]:
-        if catg in prev_mtd:
-            daily_amt = mtd_val - prev_mtd[catg]  # 差分 = 当日MTD - 前日MTD
-            if daily_amt > 0:
-                result[date][catg] += daily_amt
-        prev_mtd[catg] = mtd_val
+# ❌ 错误：不需要做 MTD 差分，字段本来就有值
+daily_amt = mtd_today - mtd_yesterday
 ```
 
-**注意**：
-- 只在 `daily_amt > 0` 时记录（避免月末清零导致的负值）
-- 月初第一条记录无前日MTD，自动跳过（正确行为）
+**三档金额字段的用途区分**：
+
+| 字段 | 含义 | 使用场景 |
+|---|---|---|
+| `transaction_today_amt` | 当日发生额 | 查单日收支明细 → **用这个** |
+| `transaction_mtd_amt` | 当月累计（MTD） | 查月度累计 / 月内趋势 |
+| `transaction_fytd_amt` | 本财年累计（FYTD） | 查财年累计 / 同比 |
+
+**MTD 差分仅作为降级备选**：只有当某段历史数据确实返回 null 时才启用。启用前先跑一次空值率检查，别默认它是 null：
+
+```python
+# 使用前先验证，别凭记忆
+nulls = sum(1 for r in rows if not r.get('transaction_today_amt'))
+print(f'空值率: {nulls}/{len(rows)}')
+```
+
+若确需差分（历史数据缺当日值），注意两点：只在 `daily_amt > 0` 时记录（避免月末清零产生负值）；月初第一条无前日 MTD，自动跳过。
 
 ---
 
@@ -1249,19 +1274,28 @@ amt_billions = mtd_val / 1000  # → 247.8 十亿美元
 
 ---
 
-### 坑5：MTD differential 计算时需排除 Total 行，否则汇总值翻倍
+### 坑5：汇总前必须排除 Total 行，否则结果翻倍
 
-**现象**：如果不排除 `account_type` 含 `"Total"` 的行，MTD differential 会把明细行和 Total 行**各计算一次**，导致最终汇总值约为正确值的 **2倍**。
+**现象**：如果不过滤 `account_type`，明细行和 Total 行会被**各计算一次**，导致最终汇总值约为正确值的 **2 倍**。这是本表最容易犯的错，无论用 `transaction_today_amt` 还是累计值都适用。
 
-**验证方法**：计算完之后，用 API 直接查 `transaction_mtd_amt` 的 Total 行最大值，与计算结果比对，应该吻合。
+**正确做法**：只认 `account_type`，**不要用 `transaction_catg` 是否为 null 来判断**（该字段不为空，详见坑1）：
 
 ```python
-# 排除 Total 行（通过 account_type 判断）
+# ✅ 正确：通过 account_type 排除汇总行
 if 'Total' in str(r.get('account_type', '')):
-    continue  # 跳过汇总行
+    continue
+
+# ✅ 更稳妥：只取精确匹配的明细账户
+if r.get('account_type') != 'Treasury General Account (TGA)':
+    continue
 ```
 
-**经验**：`transaction_catg` 为 null 的行，其 `account_type` 通常包含 `"Total"`，两个判断可以同时使用，双重保险。
+**验证方法**：算完之后与 API 返回的 Total 行比对。实测 2026-08-27：
+
+- 收入明细合计 288,579 vs Total 行 288,576
+- 支出明细合计 297,206 vs Total 行 297,207
+
+差额仅 1~3 百万美元，是各分类四舍五入到百万位的累积误差，属正常。若差到 2 倍，就是没过滤 Total 行。
 
 ---
 
@@ -1322,14 +1356,40 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 
 | 维度 | Deposits（收入） | Withdrawals（支出） |
 |---|---|---|
-| `tran_type_desc` 值 | `Deposits` | `Withdrawals` |
-| NULL 行含义 | 收入汇总（Total） | 支出汇总（Total） |
-| 需排除的 NULL 行 | ✅ 是 | ✅ 是 |
+| `transaction_type` 值 | `Deposits` | `Withdrawals` |
+| Total 汇总行的 `account_type` | `Treasury General Account Total Deposits` | `Treasury General Account Total Withdrawals` |
+| 明细行的 `account_type` | `Treasury General Account (TGA)` | `Treasury General Account (TGA)` |
+| 必须排除 Total 行 | ✅ 是 | ✅ 是 |
 | 单独拎出的关键分类 | `Public Debt Cash Issues (Table IIIB)` | `Public Debt Cash Redemp. (Table IIIB)` |
-| MTD differential | ✅ 需要（今日收入 = 今日MTD - 昨日MTD） | ✅ 需要（今日支出 = 今日MTD - 昨日MTD） |
+| 当日金额字段 | `transaction_today_amt`（直接可用） | `transaction_today_amt`（直接可用） |
 | 单位 | 百万美元 | 百万美元 |
 
-**分析模板**：写好 Deposits 的分析脚本后，Withdrawals 只需改 `tran_type_desc` 过滤值和分类名称，其余逻辑完全复用。
+**分析模板**：写好 Deposits 的分析脚本后，Withdrawals 只需改 `transaction_type` 过滤值和分类名称，其余逻辑完全复用。
+
+**标准取数模板**（单日收支明细，可直接复用）：
+
+```python
+import json, urllib.request
+BASE = 'https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/dts/deposits_withdrawals_operating_cash'
+
+def fetch_day(date):
+    url = f'{BASE}?filter=record_date:eq:{date}&page[size]=10000'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    return json.load(urllib.request.urlopen(req, timeout=120))['data']
+
+rows = fetch_day('2026-08-27')
+# 1) 只取明细行
+detail = [r for r in rows if r['account_type'] == 'Treasury General Account (TGA)']
+# 2) 直接读当日金额，无需差分
+dep = [r for r in detail if r['transaction_type'] == 'Deposits']
+wdr = [r for r in detail if r['transaction_type'] == 'Withdrawals']
+total_dep = sum(float(r['transaction_today_amt']) for r in dep) / 1000  # 十亿美元
+total_wdr = sum(float(r['transaction_today_amt']) for r in wdr) / 1000
+print(f'收入 {total_dep:.1f}B / 支出 {total_wdr:.1f}B / 净额 {total_dep-total_wdr:.1f}B')
+# 3) 与 Total 行交叉验证（差异应在个位数百万美元内）
+tot = [r for r in rows if 'Total' in r['account_type']]
+print('官方Total行:', [(r['transaction_type'], r['transaction_today_amt']) for r in tot])
+```
 
 ---
 
@@ -1344,8 +1404,9 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 ### FIMA 数据（美联储 H.4.1 报表）
 - **FIMA 数据（外国央行及国际机构持有美债）目前只能通过美联储官网每周四发布的 H.4.1 报表获取**：https://www.federalreserve.gov/releases/h41/current/h41.htm
 - 报表标题含发布日（如 "July 30, 2026"），数据反映前一周三（如 Jul 29, 2026）
-- 表格无 id 属性，需按 `<td id="t?r?c?">` 结构解析；FIMA 相关行：Table 1 `Repurchase agreements` → `Foreign official`（FIMA Repo Facility）、Table 2 `Reverse repurchase agreements` → `Foreign official and international accounts`、Table 3 `Securities held in custody for foreign official and international accounts`（含 `Marketable U.S. Treasury securities` 可流通美债托管额）
+- 表格无 id 属性，需按 `<td id="t?r?c?">` 结构解析；FIMA 相关行：Table 1 `Repurchase agreements` → `Foreign official`（FIMA Repo Facility）、Table 2 `Reverse repurchase agreements` → `Foreign official and international accounts`、Table 3 `Securities held in custody for foreign official and international accounts`（含 `Marketable U.S. Treasury securities` 可流通美债托管额）；**Table 1 另有 `Central bank liquidity swaps`（央行美元流动性互换）科目**，位于资产端，记录美联储与 ECB/BOJ/BOE/SNB 等央行的外币互换余额（按约定汇率折算美元）
 - 金额单位：百万美元（$2,638,757 = $2.64T）
+- **FIMA Repo 操作条款**（FAQ 口径）：期限为**隔夜（overnight）或 7 个日历日（seven calendar days）**；利率：隔夜期限 = Standing Overnight Repurchase Agreement Operations 最低投标利率，7 天期限 = 每周期限 OIS 利率 **+ 25bp**；抵押品为美国国债（按贴现窗口标准保证金）；仅在美元流动性紧张时使用，正常时期余额通常为 0
 
 ### TreasuryDirect 拍卖数据
 - **Tentative Auction Schedule (PDF)**: https://home.treasury.gov/system/files/221/Tentative-Auction-Schedule.pdf
@@ -1374,5 +1435,6 @@ with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
 - **Upcoming Auctions XML** / 限制：`PendingAuctions.xml` 每周五更新，仅含已公告拍卖的基本字段（SecurityType、CUSIP、日期、规模），**不含 bid-to-cover 等结果数据**（还没拍）。
 - **网络连接** / TreasuryDirect 偶发 Reset：批量抓取时偶发 `WinError 10054`（远程主机关闭连接），需加重试机制。请求间隔建议 0.15~0.3 秒。
 - **FIMA 数据** / 数据源：FIMA（Foreign & International Monetary Authorities，外国央行及国际货币当局持有美债）数据**不在** TIC 或 FiscalData API 中，目前只能通过美联储官网每周四发布的 **H.4.1 报表**（Factors Affecting Reserve Balances）获取，URL: `https://www.federalreserve.gov/releases/h41/current/h41.htm`。该 HTML 约 700KB，表格无 id 属性，解析需按 `<td id="tNrMcN">` 定位行。curl 在沙箱内可能静默失败（exit 0 但无文件），需用 Python urllib + SSL 关闭校验下载。
+- **TIC vs FIMA** / 口径关系：TIC 有"持续持有（Continuously Held）"规则（TIC Form SLT 第5节）——外国央行把美债通过 FIMA Repo 抵押给美联储，TIC 中**不减记**（视同未发生，因价格风险仍属外国央行）；只有真实出售（outright sale）才减。故 FIMA 操作不改变 TIC 各国持仓数字，仅反映在 H.4.1 Table 1 的 Repurchase agreements–Foreign official 科目。
 - **H.4.1 报表** / FIMA 相关行定位：Table 1 的 `Repurchase agreements` → `Foreign official` 行 = **FIMA Repo Facility 余额**；Table 2 的 `Reverse repurchase agreements` → `Foreign official and international accounts` = 外国官方 ON RRP；Table 3 `Securities held in custody for foreign official and international accounts` → `Marketable U.S. Treasury securities` = **外国官方托管的可流通美债额**（FIMA 持债核心指标）。金额单位为百万美元。
 - **Tentative Schedule 发布节奏** / 规律：Q1(2月初)/Q2(5月初)/Q3(8月初)/Q4(11月初)，覆盖未来约6个月。PDF 文件名 `TentativeAuctionScheduleQ<X><Year>.pdf`，但主页 URL 总是 `Tentative-Auction-Schedule.pdf` 指向最新版。
