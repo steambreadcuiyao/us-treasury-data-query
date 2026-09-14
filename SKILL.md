@@ -144,6 +144,47 @@ agent_created: true
   - 两表关系：表 III-B 第一行 `adj_type="Public Debt Issues (Table III-A)"` 的金额 = 表 III-A 当日 Issues 合计。表 III-B 其余行是对表 III-A 的现金制调整项
   - **分析现金净流入/流出**（对TGA的影响）→ 用表 III-B；**分析证券类型结构**（Bills/Notes/Bonds）→ 用表 III-A
 
+#### 4.0 国债回购（Buyback / Redemption Operation）—— 三张表的分工
+
+回购操作在 DTS 里**没有独立分类**，只能间接察觉；拿实际操作金额必须走 TreasuryDirect 官方 API。
+（2026-09-11 实测，脚本：`scripts/query_buyback_data.py`）
+
+| 口径 | 数据源 | 能拿到什么 | 局限 |
+|---|---|---|---|
+| **实际操作金额（主源）** | TreasuryDirect Buyback API（见下） | 每笔操作的面额、类型、期限段、覆盖倍数 | 需 client_id/secret，可能随页面改版失效 |
+| 应计制流量 | `public_debt_transactions` | 按 `security_type` 分的 Issues/Redemptions | **不含回购**，回购不单独列出 |
+| 现金制调整 | `adjustment_public_debt_transactions_cash_basis` | `Premium on Debt Buyback Operation`、`Discount on Debt Buyback Operation (-)` | **只有价位调整，没有本金**；金额极小，单日常为 0 |
+
+**官方回购 API**：
+
+```
+GET https://api.fiscal.treasury.gov/ap/exp/v1/marketable-securities/buybacks
+请求头：client_id: 8c94af521a854babb36ad4112c83df03
+        client_secret: c33631F97444440cbb527E79549CFc40
+```
+
+- 公告页（表格为 JS 动态渲染，WebFetch 抓不到）：`https://www.treasurydirect.gov/auctions/announcements-data-results/buy-backs/`（注意是连字符 `buy-backs`，不是 `buybacks`）
+- 凭证硬编码在该页面前端 JS 的 `host = {client_id, client_secret}` 中。**若 API 返回 401/403，重抓页面 JS 即可**，不要以为接口下线了
+- 关键字段：`operationStatus`（Results/Cancelled）、`totalParAmountAccepted`（实际回购面额，**美元**）、`totalParAmountOffered`、`settlementDT`（现金流日）、`operationType`（Liquidity Support / Cash Management）、`maturityBucket`
+- 实测 221 条记录（2000-03 至今），其中 219 笔已完成、2 笔取消；累计回购面额 550.2 十亿美元
+
+**对账验证（重要）**：以 `settlementDT` 归集回购操作，与 DTS 调整表的非零日比对——实测 **DTS 有非零足迹的 70 天全部命中公告页记录，零遗漏**。说明：
+- DTS 非零日 ⟹ 当天必有回购操作（可用作快速筛选信号）
+- 反之不成立：公告页有 219 天操作，DTS 只有 70 天有足迹。因为折价极小时四舍五入到百万位即为 0，**不能用 DTS 反推回购是否发生**
+- 单位差异：API 是**美元**，DTS 调整表是**百万美元**，混用会差 6 个数量级
+
+**Table III-B 现金制净偿还验算公式**（实测 2026-09-04 精确吻合）：
+
+```
+净现金偿还 = Public Debt Redemptions (Table IIIA)
+           + Premium on Debt Buyback Operation
+           - Discount on Debt Buyback Operation (-)
+           - Government Account Transactions (-)
+           - Federal Financing Bank (-)
+```
+
+注意 **折价是减项**（回购折价 = 低于面值买回，实付现金更少）。加减写反会差数百个百万美元。
+
 ---
 
 
@@ -1252,6 +1293,8 @@ print(f'空值率: {nulls}/{len(rows)}')
 
 **分析建议**：这两项是**现金制**（Table III-B），直接反映对TGA账户的实际现金影响，比应计制（Table III-A）更贴近现金流分析。
 
+**如果要继续拆到国债回购（buyback）**：上面两个分类拿不到回购，DTS 里回购只有 `adjustment_public_debt_transactions_cash_basis` 表的 premium/discount 两个价位字段。**实际操作金额必须走 TreasuryDirect Buyback API**，详见「三、数据表详解」中「4.0 国债回购」一节，或用 `scripts/query_buyback_data.py`。
+
 ---
 
 ### 坑4：金额单位是百万美元，图表展示需转十亿
@@ -1437,4 +1480,6 @@ print('官方Total行:', [(r['transaction_type'], r['transaction_today_amt']) fo
 - **FIMA 数据** / 数据源：FIMA（Foreign & International Monetary Authorities，外国央行及国际货币当局持有美债）数据**不在** TIC 或 FiscalData API 中，目前只能通过美联储官网每周四发布的 **H.4.1 报表**（Factors Affecting Reserve Balances）获取，URL: `https://www.federalreserve.gov/releases/h41/current/h41.htm`。该 HTML 约 700KB，表格无 id 属性，解析需按 `<td id="tNrMcN">` 定位行。curl 在沙箱内可能静默失败（exit 0 但无文件），需用 Python urllib + SSL 关闭校验下载。
 - **TIC vs FIMA** / 口径关系：TIC 有"持续持有（Continuously Held）"规则（TIC Form SLT 第5节）——外国央行把美债通过 FIMA Repo 抵押给美联储，TIC 中**不减记**（视同未发生，因价格风险仍属外国央行）；只有真实出售（outright sale）才减。故 FIMA 操作不改变 TIC 各国持仓数字，仅反映在 H.4.1 Table 1 的 Repurchase agreements–Foreign official 科目。
 - **H.4.1 报表** / FIMA 相关行定位：Table 1 的 `Repurchase agreements` → `Foreign official` 行 = **FIMA Repo Facility 余额**；Table 2 的 `Reverse repurchase agreements` → `Foreign official and international accounts` = 外国官方 ON RRP；Table 3 `Securities held in custody for foreign official and international accounts` → `Marketable U.S. Treasury securities` = **外国官方托管的可流通美债额**（FIMA 持债核心指标）。金额单位为百万美元。
+- **国债回购（Buyback）/ 数据源**：回购操作在 DTS 中**没有独立分类**，`public_debt_transactions` 的 Issues/Redemptions 都不含回购本金。DTS 里唯一的回购足迹在 `adjustment_public_debt_transactions_cash_basis` 表的 `Premium on Debt Buyback Operation` / `Discount on Debt Buyback Operation (-)` 两个字段，**且只有价位调整、没有本金**，单日常常四舍五入为 0。实际操作金额必须调用 TreasuryDirect 官方 API：`GET https://api.fiscal.treasury.gov/ap/exp/v1/marketable-securities/buybacks`，请求头带 `client_id: 8c94af521a854babb36ad4112c83df03`、`client_secret: c33631F97444440cbb527E79549CFc40`。该凭证硬编码在公告页 `https://www.treasurydirect.gov/auctions/announcements-data-results/buy-backs/`（连字符 buy-backs）前端 JS 的 `host = {...}` 中，API 报 401/403 时重抓页面 JS 即可，别误判为接口下线。关键字段 `totalParAmountAccepted`（**美元**，不是百万美元）、`settlementDT`（现金流日，不是 operationStartDTM）。封装脚本：`scripts/query_buyback_data.py`。
+- **国债回购 / 对账口径**：以 `settlementDT` 归集回购操作后与 DTS 调整表非零日比对，实测 DTS 非零的 70 天**全部**命中公告页记录（2000-03 至今 219 笔已完成操作）。即：DTS 非零 ⟹ 当天必有回购；但公告页 219 天中 DTS 只有 70 天有足迹，**反向不成立**，不能用 DTS 反推回购是否发生。另注意 Table III-B 净偿还公式中**折价是减项**（折价回购=低于面值买回，实付现金更少）：净现金偿还 = Public Debt Redemptions (Table IIIA) + Premium - Discount - Government Account - FFB，实测 2026-09-04 精确吻合。
 - **Tentative Schedule 发布节奏** / 规律：Q1(2月初)/Q2(5月初)/Q3(8月初)/Q4(11月初)，覆盖未来约6个月。PDF 文件名 `TentativeAuctionScheduleQ<X><Year>.pdf`，但主页 URL 总是 `Tentative-Auction-Schedule.pdf` 指向最新版。
