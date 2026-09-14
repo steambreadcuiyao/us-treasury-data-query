@@ -8,6 +8,7 @@
 | **MSPD**（Monthly Statement of Public Debt） | 存量余额 + 利率 + 利息支出 | FiscalData REST API |
 | **TIC**（Treasury International Capital） | 外国持有美债数据 | 文本文件下载 |
 | **TreasuryDirect Auctions** | 拍卖计划 / 结果 / 近期安排 | XML 批量抓取 / PDF 解析 |
+| **TreasuryDirect Buybacks** | 国债回购操作（实际回购面额） | 官方 API（前端凭证） |
 
 ## 核心功能
 
@@ -18,6 +19,7 @@
 - ✅ **拍卖结果批量抓取**（XML，含 bid-to-cover + 投标人分类）
 - ✅ **近期拍卖安排**（Upcoming Auctions / PendingAuctions.xml）
 - ✅ **计划 vs 实际偏差对比**
+- ✅ **国债回购操作查询**（含实际回购面额、覆盖倍数、与 DTS 对账）
 - ✅ CSV 导出（UTF-8 BOM，中文表头）
 - ✅ 数据分析（描述统计、趋势、同比/环比、异常检测）
 
@@ -28,6 +30,7 @@
 ├── scripts/
 │   ├── query_treasury_data.py    # FiscalData API 查询（DTS/MSPD）
 │   ├── query_tic_data.py         # TIC 外国持有美债数据
+│   ├── query_buyback_data.py     # 国债回购操作（TreasuryDirect 官方 API）
 │   ├── scrape_month_auctions.py  # 批量抓取月度拍卖 XML
 │   ├── parse_tentative_schedule.py # 解析 Tentative Schedule PDF
 │   └── compare_plan_vs_actual.py # 计划 vs 实际对比
@@ -53,10 +56,16 @@ python scripts/query_treasury_data.py --table mspd_summary
 
 # 查询外国持有美债
 python scripts/query_tic_data.py --top 10
+
+# 查询国债回购操作（含实际回购面额）
+python scripts/query_buyback_data.py --recent 20
+python scripts/query_buyback_data.py --year 2026 --csv
+python scripts/query_buyback_data.py --reconcile   # 与 DTS 调整表对账
 ```
 
 ## 数据源参考
 
 - [FiscalData API](https://api.fiscaldata.treasury.gov/)
 - [TreasuryDirect Auctions](https://www.treasurydirect.gov/auctions/)
+- [TreasuryDirect Buyback Announcements](https://www.treasurydirect.gov/auctions/announcements-data-results/buy-backs/)
 - [TIC System](https://home.treasury.gov/data/treasury-international-capital-tic-system)
